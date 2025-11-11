@@ -13,6 +13,7 @@ from streamlit_option_menu import option_menu
 from streamlit_lottie import st_lottie
 import time
 from typing import List, Dict, Tuple, Any, Optional
+from gap_analysis import render_gap_analysis_page
 
 # Import the analytics module
 from analytics import render_analytics_page
@@ -844,8 +845,8 @@ with st.sidebar:
     
     selected = option_menu(
         "Navigation",
-        ["Home", "Results", "Analytics", "Suggestions", "Export"],
-        icons=['house', 'table', 'graph-up', 'search', 'box-arrow-down'],
+        ["Home", "Results", "Analytics", "Gap Analysis", "Suggestions", "Export"],  # Added "Gap Analysis"
+        icons=['house', 'table', 'graph-up', 'bullseye', 'search', 'box-arrow-down'],  # Added bullseye icon
         menu_icon="list",
         default_index=0,
     )
@@ -1087,6 +1088,9 @@ elif st.session_state.page == "results":
 # Analytics page - Using the imported function
 elif st.session_state.page == "analytics":
     render_analytics_page(mitre_techniques)
+
+elif st.session_state.page == "gap analysis":
+    render_gap_analysis_page(mitre_techniques)
 
 # Suggestions page
 elif st.session_state.page == "suggestions":
