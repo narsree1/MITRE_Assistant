@@ -46,17 +46,39 @@ def call_claude_api(prompt: str, api_key: str, model: str = "claude-sonnet-4-202
 
 def get_uncovered_techniques(covered_techniques: Dict, all_mitre_techniques: List[Dict]) -> Tuple[List[Dict], int]:
     """
-    Identify MITRE techniques that are not covered by current use cases
-    Only count parent techniques (not sub-techniques with dots in ID)
-    Returns tuple of (uncovered_techniques, total_parent_technique_count)
+    Identify MITRE techniques that are not covered by current use cases.
+    Only counts parent techniques (not sub-techniques with dots in ID).
+    
+    Returns:
+        Tuple of (uncovered_techniques_list, total_parent_technique_count)
     """
-    covered_ids = set(covered_techniques.keys())
+    # Extract covered technique IDs (remove any formatting like "T1234 - Name")
+    covered_ids = set()
+    for tech_id in covered_techniques.keys():
+        # Extract just the ID part if it contains " - "
+        if ' - ' in str(tech_id):
+            clean_id = str(tech_id).split(' - ')[0].strip()
+        else:
+            clean_id = str(tech_id).strip()
+        covered_ids.add(clean_id)
     
     # Filter to only parent techniques (exclude sub-techniques)
-    parent_techniques = [tech for tech in all_mitre_techniques if '.' not in tech['id']]
-    all_technique_ids = {tech['id'] for tech in parent_techniques}
+    # Sub-techniques have format T####.### (with a dot)
+    parent_techniques = []
+    for tech in all_mitre_techniques:
+        tech_id = tech.get('id', '')
+        # Only include if:
+        # 1. ID starts with 'T' 
+        # 2. ID does not contain a dot (not a sub-technique)
+        # 3. ID is not 'N/A'
+        if tech_id.startswith('T') and '.' not in tech_id and tech_id != 'N/A':
+            parent_techniques.append(tech)
     
-    uncovered_ids = all_technique_ids - covered_ids
+    # Get set of all parent technique IDs
+    all_parent_ids = {tech['id'] for tech in parent_techniques}
+    
+    # Find uncovered IDs
+    uncovered_ids = all_parent_ids - covered_ids
     
     # Return full technique details for uncovered techniques
     uncovered = [tech for tech in parent_techniques if tech['id'] in uncovered_ids]
@@ -69,41 +91,63 @@ def prioritize_gaps(uncovered_techniques: List[Dict],
     Prioritize gaps based on multiple factors:
     - Tactic criticality (Initial Access, Execution, Persistence are high priority)
     - Technique prevalence (common techniques used by threat actors)
-    - Environmental relevance
+    
+    Priority Score Calculation:
+    - Tactic Score (60% weight): 6-10 based on tactic criticality
+    - Prevalence Score (40% weight): 10 for high prevalence, 5 for medium
+    - Final Score = (Tactic Score × 0.6) + (Prevalence Score × 0.4)
+    - High Priority = Score >= 8.0
     """
     
-    # Define priority scores for tactics
+    # Define priority scores for tactics based on security impact
     tactic_priority = {
-        'initial-access': 10,
-        'execution': 9,
-        'persistence': 9,
-        'privilege-escalation': 8,
-        'defense-evasion': 8,
-        'credential-access': 8,
-        'discovery': 6,
-        'lateral-movement': 7,
-        'collection': 6,
-        'command-and-control': 7,
-        'exfiltration': 8,
-        'impact': 9
+        'initial-access': 10,      # Critical: Entry point for attackers
+        'execution': 9,             # High: Running malicious code
+        'persistence': 9,           # High: Maintaining foothold
+        'privilege-escalation': 8,  # High: Gaining elevated access
+        'defense-evasion': 8,       # High: Avoiding detection
+        'credential-access': 8,     # High: Stealing credentials
+        'discovery': 6,             # Medium: Reconnaissance
+        'lateral-movement': 7,      # Medium-High: Spreading
+        'collection': 6,            # Medium: Gathering data
+        'command-and-control': 7,   # Medium-High: Communication
+        'exfiltration': 8,          # High: Data theft
+        'impact': 9                 # High: Disruption/destruction
     }
     
-    # Common techniques based on ATT&CK statistics (simplified)
+    # Common techniques based on real-world threat intelligence
+    # These are frequently observed in the wild
     high_prevalence_techniques = {
-        'T1059', 'T1053', 'T1055', 'T1003', 'T1078', 'T1082', 
-        'T1083', 'T1021', 'T1070', 'T1105', 'T1027', 'T1204'
+        'T1059',  # Command and Scripting Interpreter
+        'T1053',  # Scheduled Task/Job
+        'T1055',  # Process Injection
+        'T1003',  # OS Credential Dumping
+        'T1078',  # Valid Accounts
+        'T1082',  # System Information Discovery
+        'T1083',  # File and Directory Discovery
+        'T1021',  # Remote Services
+        'T1070',  # Indicator Removal
+        'T1105',  # Ingress Tool Transfer
+        'T1027',  # Obfuscated Files or Information
+        'T1204',  # User Execution
+        'T1071',  # Application Layer Protocol
+        'T1569',  # System Services
+        'T1562'   # Impair Defenses
     }
     
     gap_data = []
     
     for tech in uncovered_techniques:
-        # Calculate priority score
-        tactic_score = max([tactic_priority.get(tactic, 5) 
-                           for tactic in tech.get('tactics_list', [])])
+        # Calculate tactic score (use highest if multiple tactics)
+        tactic_score = 5  # Default
+        if tech.get('tactics_list'):
+            tactic_score = max([tactic_priority.get(tactic, 5) 
+                               for tactic in tech.get('tactics_list', [])])
         
+        # Calculate prevalence score
         prevalence_score = 10 if tech['id'] in high_prevalence_techniques else 5
         
-        # Combined priority score
+        # Combined priority score (weighted average)
         priority_score = (tactic_score * 0.6) + (prevalence_score * 0.4)
         
         gap_data.append({
@@ -155,9 +199,9 @@ Below are {len(techniques_info)} high-priority techniques that need coverage:
 
 For each technique, please provide:
 1. A concise use case name (e.g., "Detect PowerShell Execution")
-2. A detailed description of what to monitor and detect
-3. Recommended log sources to implement this detection
-4. Any specific indicators or patterns to look for
+2. A detailed description of what to monitor and detect (2-3 sentences)
+3. Recommended log sources to implement this detection (be specific)
+4. Key indicators or patterns to look for (specific events, behaviors, or anomalies)
 
 Format your response as a JSON array with this structure:
 [
@@ -196,13 +240,14 @@ IMPORTANT: Return ONLY valid JSON, no other text. Ensure all quotes are properly
                 # Get the original gap info for priority score
                 gap_row = top_gaps[top_gaps['Technique ID'] == rec.get('technique_id')]
                 priority = gap_row.iloc[0]['Priority Score'] if not gap_row.empty else 5.0
+                tactic = gap_row.iloc[0]['Primary Tactic'] if not gap_row.empty else 'Unknown'
                 url = gap_row.iloc[0]['URL'] if not gap_row.empty else ''
                 
                 suggestions.append({
                     'Priority Rank': i + 1,
                     'Missing Technique ID': rec.get('technique_id', 'N/A'),
                     'Missing Technique Name': rec.get('technique_name', 'N/A'),
-                    'Primary Tactic': rec.get('technique_id', 'N/A').split('-')[0] if '-' in rec.get('technique_id', '') else 'Unknown',
+                    'Primary Tactic': tactic,
                     'Priority Score': priority,
                     'Suggested Use Case': rec.get('use_case_name', 'N/A'),
                     'Suggested Description': rec.get('description', 'N/A'),
@@ -217,107 +262,6 @@ IMPORTANT: Return ONLY valid JSON, no other text. Ensure all quotes are properly
             st.error(f"Error parsing Claude API response: {str(e)}")
             st.error(f"Response received: {response[:500]}")
             return pd.DataFrame()
-
-def generate_log_sources_with_claude(suggestions_df: pd.DataFrame,
-                                     existing_log_sources: set,
-                                     api_key: str) -> Dict:
-    """
-    Use Claude API to analyze and recommend log sources needed for coverage
-    """
-    
-    if suggestions_df.empty or not api_key:
-        return {
-            'missing_sources': set(),
-            'existing_coverage': set(),
-            'source_analysis': [],
-            'total_recommended': 0
-        }
-    
-    # Extract recommended log sources
-    recommended_sources = set()
-    for sources in suggestions_df['Recommended Log Source']:
-        if pd.notna(sources) and sources != 'N/A':
-            for source in str(sources).split(','):
-                recommended_sources.add(source.strip())
-    
-    # Identify missing log sources
-    missing_sources = recommended_sources - existing_log_sources
-    existing_coverage = recommended_sources & existing_log_sources
-    
-    if not missing_sources:
-        return {
-            'missing_sources': missing_sources,
-            'existing_coverage': existing_coverage,
-            'source_analysis': [],
-            'total_recommended': len(recommended_sources)
-        }
-    
-    # Use Claude to provide detailed analysis of missing log sources
-    prompt = f"""You are a cybersecurity infrastructure expert. Analyze the following missing log sources and provide recommendations.
-
-Currently Available Log Sources:
-{json.dumps(list(existing_log_sources), indent=2)}
-
-Missing Log Sources Needed:
-{json.dumps(list(missing_sources), indent=2)}
-
-For each missing log source, provide:
-1. Priority (High/Medium/Low) - based on security value
-2. Implementation difficulty (Easy/Medium/Hard)
-3. Number of use cases it would enable (count from the list below)
-4. Brief implementation guidance (1-2 sentences)
-5. Estimated cost (Low/Medium/High)
-
-Use cases that need these sources:
-{suggestions_df[['Suggested Use Case', 'Recommended Log Source']].to_dict('records')}
-
-Format your response as a JSON array:
-[
-  {{
-    "log_source": "Source Name",
-    "priority": "High/Medium/Low",
-    "difficulty": "Easy/Medium/Hard",
-    "use_cases_enabled": 5,
-    "implementation_guidance": "Brief guidance...",
-    "estimated_cost": "Low/Medium/High"
-  }},
-  ...
-]
-
-IMPORTANT: Return ONLY valid JSON, no other text."""
-
-    with st.spinner("Analyzing log source requirements with Claude..."):
-        response = call_claude_api(prompt, api_key)
-        
-        try:
-            # Clean the response
-            cleaned_response = response.strip()
-            if cleaned_response.startswith('```json'):
-                cleaned_response = cleaned_response[7:]
-            if cleaned_response.startswith('```'):
-                cleaned_response = cleaned_response[3:]
-            if cleaned_response.endswith('```'):
-                cleaned_response = cleaned_response[:-3]
-            cleaned_response = cleaned_response.strip()
-            
-            analysis = json.loads(cleaned_response)
-            
-            return {
-                'missing_sources': missing_sources,
-                'existing_coverage': existing_coverage,
-                'source_analysis': analysis,
-                'total_recommended': len(recommended_sources)
-            }
-            
-        except json.JSONDecodeError as e:
-            st.error(f"Error parsing Claude API response for log sources: {str(e)}")
-            # Return basic analysis without Claude insights
-            return {
-                'missing_sources': missing_sources,
-                'existing_coverage': existing_coverage,
-                'source_analysis': [],
-                'total_recommended': len(recommended_sources)
-            }
 
 def render_gap_analysis_page(mitre_techniques):
     """
@@ -361,11 +305,11 @@ def render_gap_analysis_page(mitre_techniques):
     
     covered_count = len(covered_techniques)
     gap_count = len(uncovered)
-    coverage_pct = round((covered_count / total_parent_techniques) * 100, 1)
+    coverage_pct = round((covered_count / total_parent_techniques) * 100, 1) if total_parent_techniques > 0 else 0
     
     with col1:
         st.metric("Total MITRE Techniques", total_parent_techniques, 
-                 help="Parent techniques only (excluding sub-techniques)")
+                 help="Enterprise ATT&CK parent techniques only (excluding sub-techniques)")
     with col2:
         st.metric("Covered Techniques", covered_count, 
                  delta=f"{coverage_pct}% coverage")
@@ -374,16 +318,54 @@ def render_gap_analysis_page(mitre_techniques):
                  delta=f"{100-coverage_pct}% uncovered", delta_color="inverse")
     with col4:
         high_priority_gaps = len(gap_df[gap_df['Priority Score'] >= 8])
-        st.metric("High Priority Gaps", high_priority_gaps)
+        st.metric("High Priority Gaps", high_priority_gaps,
+                 help="Techniques with Priority Score >= 8.0")
     
-    # Display prioritized gaps (removed filters)
+    # Priority Score Explanation
+    with st.expander("ℹ️ How Priority Score is Calculated"):
+        st.markdown("""
+        **Priority Score Formula:**
+        - **Tactic Score** (60% weight): Based on security criticality
+          - Critical (10): Initial Access, Impact
+          - High (9): Execution, Persistence
+          - High (8): Privilege Escalation, Defense Evasion, Credential Access, Exfiltration
+          - Medium-High (7): Lateral Movement, Command & Control
+          - Medium (6): Discovery, Collection
+        
+        - **Prevalence Score** (40% weight): Based on real-world threat intelligence
+          - High (10): Frequently observed in the wild
+          - Medium (5): Less commonly observed
+        
+        **Final Score** = (Tactic Score × 0.6) + (Prevalence Score × 0.4)
+        
+        **High Priority** = Score >= 8.0
+        
+        This means techniques are prioritized if they are either:
+        - Part of critical tactics (Initial Access, Execution, Persistence, Impact), OR
+        - Commonly used by threat actors in real-world attacks
+        """)
+    
+    # Display prioritized gaps
     st.markdown("### 🔴 Top Priority Gaps")
-    st.markdown("These techniques are not currently covered and should be prioritized based on prevalence and criticality.")
+    st.markdown("These techniques are not currently covered and are prioritized by security impact and real-world prevalence.")
     
-    # Display top gaps without filters
+    # Show top 20 gaps by default
     display_cols = ['Priority Score', 'Technique ID', 'Technique Name', 
                    'Primary Tactic', 'Prevalence']
-    st.dataframe(gap_df[display_cols], use_container_width=True)
+    
+    # Add filter for showing all or just high priority
+    show_filter = st.radio(
+        "Display:",
+        options=["Show All Gaps", "High Priority Only (Score >= 8)"],
+        horizontal=True
+    )
+    
+    if show_filter == "High Priority Only (Score >= 8)":
+        filtered_gaps = gap_df[gap_df['Priority Score'] >= 8]
+    else:
+        filtered_gaps = gap_df
+    
+    st.dataframe(filtered_gaps[display_cols], use_container_width=True)
     
     # AI-Powered Use Case Suggestions with Claude API
     st.markdown("---")
@@ -474,78 +456,6 @@ def render_gap_analysis_page(mitre_techniques):
                 st.markdown("**MITRE ATT&CK Reference**")
                 if selected['MITRE URL']:
                     st.markdown(f"[View on MITRE ATT&CK]({selected['MITRE URL']})")
-        
-        # Log Source Analysis with Claude API
-        st.markdown("---")
-        st.markdown("### 📊 Log Source Onboarding Analysis")
-        st.markdown("Powered by Claude API - Get intelligent recommendations for log source prioritization")
-        
-        if not api_key:
-            st.warning("⚠ Please enter your Anthropic API Key in the sidebar to enable log source analysis.")
-        else:
-            if st.button("Analyze Log Source Requirements", type="primary"):
-                # Get existing log sources
-                existing_sources = set()
-                if 'Log Source' in df.columns:
-                    for source in df['Log Source']:
-                        if pd.notna(source) and source != 'N/A':
-                            for s in str(source).split(','):
-                                existing_sources.add(s.strip())
-                
-                # Analyze log source needs with Claude
-                log_analysis = generate_log_sources_with_claude(
-                    suggestions_df,
-                    existing_sources,
-                    api_key
-                )
-                
-                st.session_state.log_analysis = log_analysis
-                st.success("✓ Log source analysis complete!")
-            
-            # Display log analysis if available
-            if 'log_analysis' in st.session_state:
-                log_analysis = st.session_state.log_analysis
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("#### Missing Log Sources")
-                    if log_analysis['missing_sources']:
-                        st.warning(f"You need {len(log_analysis['missing_sources'])} additional log sources")
-                        
-                        # Show Claude's detailed analysis
-                        if log_analysis['source_analysis']:
-                            analysis_df = pd.DataFrame(log_analysis['source_analysis'])
-                            
-                            # Reorder columns for better display
-                            column_order = ['log_source', 'priority', 'use_cases_enabled', 
-                                          'difficulty', 'estimated_cost', 'implementation_guidance']
-                            analysis_df = analysis_df[[col for col in column_order if col in analysis_df.columns]]
-                            
-                            # Rename columns for display
-                            analysis_df = analysis_df.rename(columns={
-                                'log_source': 'Log Source',
-                                'priority': 'Priority',
-                                'use_cases_enabled': 'Use Cases Enabled',
-                                'difficulty': 'Implementation',
-                                'estimated_cost': 'Est. Cost',
-                                'implementation_guidance': 'Implementation Guidance'
-                            })
-                            
-                            st.dataframe(analysis_df, use_container_width=True)
-                        else:
-                            # Fallback to simple list if Claude analysis failed
-                            for source in sorted(log_analysis['missing_sources']):
-                                st.write(f"❌ {source}")
-                    else:
-                        st.success("All recommended log sources are already onboarded!")
-                
-                with col2:
-                    st.markdown("#### Existing Coverage")
-                    st.info(f"{len(log_analysis['existing_coverage'])} recommended sources already available")
-                    if log_analysis['existing_coverage']:
-                        for source in sorted(log_analysis['existing_coverage']):
-                            st.write(f"✅ {source}")
         
         # Download options
         st.markdown("---")
