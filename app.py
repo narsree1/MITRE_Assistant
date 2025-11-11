@@ -393,13 +393,28 @@ def load_model():
 
 @st.cache_data
 def load_mitre_data():
+    """
+    Load MITRE ATT&CK Enterprise data from GitHub.
+    ONLY loads parent techniques (excludes sub-techniques).
+    
+    Returns:
+        techniques: List of parent technique dictionaries
+        tactic_mapping: Dictionary mapping tactic names to IDs
+        tactics_list: List of all tactic names
+    """
     try:
-        response = requests.get("https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json")
+        response = requests.get(
+            "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json",
+            timeout=30
+        )
+        response.raise_for_status()
         attack_data = response.json()
+        
         techniques = []
         tactic_mapping = {}
         tactics_list = []
 
+        # First pass: Load all tactics
         for obj in attack_data['objects']:
             if obj.get('type') == 'x-mitre-tactic':
                 tactic_id = obj.get('external_references', [{}])[0].get('external_id', 'N/A')
@@ -407,23 +422,57 @@ def load_mitre_data():
                 tactic_mapping[tactic_name] = tactic_id
                 tactics_list.append(tactic_name)
 
+        # Second pass: Load ONLY parent techniques (exclude sub-techniques)
+        parent_count = 0
+        sub_count = 0
+        
         for obj in attack_data['objects']:
             if obj.get('type') == 'attack-pattern':
-                tech_id = obj.get('external_references', [{}])[0].get('external_id', 'N/A')
+                # Get external references
+                external_refs = obj.get('external_references', [])
+                if not external_refs:
+                    continue
+                
+                tech_id = external_refs[0].get('external_id', 'N/A')
+                
+                # Validate technique ID
+                if not tech_id or tech_id == 'N/A':
+                    continue
+                
+                # CRITICAL: Skip sub-techniques (they contain a dot in the ID)
+                # Examples: T1059.001, T1003.002, T1566.001
                 if '.' in tech_id:
-                    continue  # Skip sub-techniques
+                    sub_count += 1
+                    continue
+                
+                # CRITICAL: Only include IDs starting with 'T'
+                if not tech_id.startswith('T'):
+                    continue
+                
+                # This is a valid parent technique
+                parent_count += 1
                 techniques.append({
                     'id': tech_id,
                     'name': obj.get('name', 'N/A'),
                     'description': obj.get('description', ''),
                     'tactic': ', '.join([phase['phase_name'] for phase in obj.get('kill_chain_phases', [])]),
                     'tactics_list': [phase['phase_name'] for phase in obj.get('kill_chain_phases', [])],
-                    'url': obj.get('external_references', [{}])[0].get('url', '')
+                    'url': external_refs[0].get('url', '')
                 })
         
+        # Log statistics (helpful for debugging)
+        print(f"✓ MITRE Data Loaded: {parent_count} parent techniques, {sub_count} sub-techniques excluded")
+        
         return techniques, tactic_mapping, tactics_list
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching MITRE data: {e}")
+        return [], {}, []
+    except json.JSONDecodeError as e:
+        st.error(f"Error parsing MITRE data: {e}")
+        return [], {}, []
     except Exception as e:
-        st.error(f"Error loading MITRE data: {e}")
+        st.error(f"Unexpected error loading MITRE data: {e}")
         return [], {}, []
 
 # Optimize the MITRE embeddings function for PyTorch
@@ -845,8 +894,8 @@ with st.sidebar:
     
     selected = option_menu(
         "Navigation",
-        ["Home", "Results", "Analytics", "Gap Analysis", "Suggestions", "Export"],  # Added "Gap Analysis"
-        icons=['house', 'table', 'graph-up', 'bullseye', 'search', 'box-arrow-down'],  # Added bullseye icon
+        ["Home", "Results", "Analytics", "Gap Analysis", "Suggestions", "Export"],
+        icons=['house', 'table', 'graph-up', 'bullseye', 'search', 'box-arrow-down'],
         menu_icon="list",
         default_index=0,
     )
@@ -870,7 +919,7 @@ with st.sidebar:
     """)
     
     st.markdown("---")
-    st.markdown("© 2025 | v1.4.3 (Fixed)")
+    st.markdown("© 2025 | v1.5.0 (Fixed Count)")
 
 # Load the ML model and MITRE data
 model = load_model()
@@ -888,6 +937,9 @@ if library_df is not None:
 
 # Store model in session state for use in suggestions
 st.session_state.model = model
+
+# Store MITRE techniques in session state for Gap Analysis
+st.session_state.mitre_techniques = mitre_techniques
 
 # Home page
 if st.session_state.page == "home":
@@ -944,6 +996,9 @@ if st.session_state.page == "home":
                     # Show library statistics if available
                     if st.session_state.library_data is not None:
                         st.info(f"Library has {len(st.session_state.library_data)} pre-mapped security use cases that will be matched first.")
+                    
+                    # Show MITRE technique count
+                    st.info(f"MITRE Enterprise ATT&CK: {len(mitre_techniques)} parent techniques loaded (sub-techniques excluded)")
                     
                     if st.button("Start Mapping", key="start_mapping"):
                         with st.spinner("Mapping security use cases to MITRE ATT&CK..."):
