@@ -101,7 +101,13 @@ def render_analytics_page(mitre_techniques):
         # Update session state for other pages
         st.session_state.techniques_count = processed_techniques_count
         
-        total_techniques = 203  # Total number of MITRE techniques
+        # FIXED: Calculate total parent techniques dynamically (matching gap_analysis.py logic)
+        # This counts only parent techniques (no sub-techniques with dots in ID)
+        total_techniques = sum(1 for tech in mitre_techniques 
+                              if tech.get('id', '').startswith('T') 
+                              and '.' not in tech.get('id', '') 
+                              and tech.get('id', '') != 'N/A')
+        
         covered_techniques = len(processed_techniques_count.keys())
         coverage_percent = round((covered_techniques / total_techniques) * 100, 2)
         
