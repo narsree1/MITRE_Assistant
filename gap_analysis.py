@@ -1,4 +1,4 @@
-# gap_analysis.py - AI-Powered Coverage Gap Analysis with Claude API
+# gap_analysis.py - Library-Based Coverage Gap Analysis
 
 import pandas as pd
 import streamlit as st
@@ -6,43 +6,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 from typing import List, Dict, Tuple
 import torch
-import requests
-import json
-
-def call_claude_api(prompt: str, api_key: str, model: str = "claude-sonnet-4-20250514") -> str:
-    """
-    Call Claude API with a given prompt
-    """
-    try:
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        
-        data = {
-            "model": model,
-            "max_tokens": 4096,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
-        }
-        
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=data,
-            timeout=60
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            return result['content'][0]['text']
-        else:
-            return f"Error: API returned status code {response.status_code} - {response.text}"
-            
-    except Exception as e:
-        return f"Error calling Claude API: {str(e)}"
 
 def get_uncovered_techniques(covered_techniques: Dict, all_mitre_techniques: List[Dict]) -> Tuple[List[Dict], int]:
     """
@@ -166,106 +129,99 @@ def prioritize_gaps(uncovered_techniques: List[Dict],
     
     return df
 
-def generate_use_cases_with_claude(gap_df: pd.DataFrame, 
-                                    api_key: str,
-                                    top_n: int = 10) -> pd.DataFrame:
+def find_library_matches_for_gaps(gap_df: pd.DataFrame, 
+                                   library_df: pd.DataFrame,
+                                   mitre_techniques: List[Dict]) -> pd.DataFrame:
     """
-    Use Claude API to generate intelligent use case recommendations for coverage gaps
+    Find library use cases that match the uncovered techniques in gap analysis.
+    Returns a DataFrame with library recommendations sorted by priority score.
     """
-    
-    if gap_df.empty or not api_key:
+    if gap_df.empty or library_df is None or library_df.empty:
         return pd.DataFrame()
     
-    suggestions = []
+    recommendations = []
     
-    # Focus on top priority gaps
-    top_gaps = gap_df.head(top_n)
+    # Create a mapping of technique names to IDs for easier matching
+    technique_name_to_id = {tech['name']: tech['id'] for tech in mitre_techniques}
+    technique_id_to_info = {tech['id']: tech for tech in mitre_techniques}
     
-    # Create a batch prompt for efficiency
-    techniques_info = []
-    for _, gap in top_gaps.iterrows():
-        techniques_info.append({
-            'id': gap['Technique ID'],
-            'name': gap['Technique Name'],
-            'tactic': gap['Primary Tactic'],
-            'description': gap['Description']
-        })
-    
-    prompt = f"""You are a cybersecurity expert helping to create detection use cases for MITRE ATT&CK techniques that are currently not covered.
-
-Below are {len(techniques_info)} high-priority techniques that need coverage:
-
-{json.dumps(techniques_info, indent=2)}
-
-For each technique, please provide:
-1. A concise use case name (e.g., "Detect PowerShell Execution")
-2. A detailed description of what to monitor and detect (2-3 sentences)
-3. Recommended log sources to implement this detection (be specific)
-4. Key indicators or patterns to look for (specific events, behaviors, or anomalies)
-
-Format your response as a JSON array with this structure:
-[
-  {{
-    "technique_id": "T1234",
-    "technique_name": "Example Technique",
-    "use_case_name": "Detect Example Technique",
-    "description": "Detailed description of what to monitor...",
-    "log_sources": ["Windows Event Logs", "EDR"],
-    "indicators": ["Specific patterns or behaviors to detect"]
-  }},
-  ...
-]
-
-IMPORTANT: Return ONLY valid JSON, no other text. Ensure all quotes are properly escaped."""
-
-    with st.spinner("Generating intelligent use case recommendations with Claude..."):
-        response = call_claude_api(prompt, api_key)
+    # For each gap (uncovered technique)
+    for _, gap_row in gap_df.iterrows():
+        gap_technique_id = gap_row['Technique ID']
+        gap_technique_name = gap_row['Technique Name']
         
-        # Try to parse the JSON response
-        try:
-            # Clean the response - remove markdown code blocks if present
-            cleaned_response = response.strip()
-            if cleaned_response.startswith('```json'):
-                cleaned_response = cleaned_response[7:]
-            if cleaned_response.startswith('```'):
-                cleaned_response = cleaned_response[3:]
-            if cleaned_response.endswith('```'):
-                cleaned_response = cleaned_response[:-3]
-            cleaned_response = cleaned_response.strip()
+        # Search library for use cases that map to this technique
+        for _, lib_row in library_df.iterrows():
+            lib_techniques = str(lib_row.get('Mapped MITRE Technique(s)', ''))
             
-            recommendations = json.loads(cleaned_response)
+            if pd.isna(lib_techniques) or lib_techniques == 'N/A':
+                continue
             
-            # Convert to DataFrame
-            for i, rec in enumerate(recommendations):
-                # Get the original gap info for priority score
-                gap_row = top_gaps[top_gaps['Technique ID'] == rec.get('technique_id')]
-                priority = gap_row.iloc[0]['Priority Score'] if not gap_row.empty else 5.0
-                tactic = gap_row.iloc[0]['Primary Tactic'] if not gap_row.empty else 'Unknown'
-                url = gap_row.iloc[0]['URL'] if not gap_row.empty else ''
+            # Check if this library entry covers the gap technique
+            # Handle both "T1234 - Name" and "Name" formats
+            technique_matched = False
+            
+            # Split comma-separated techniques
+            for lib_tech in lib_techniques.split(','):
+                lib_tech = lib_tech.strip()
                 
-                suggestions.append({
-                    'Priority Rank': i + 1,
-                    'Missing Technique ID': rec.get('technique_id', 'N/A'),
-                    'Missing Technique Name': rec.get('technique_name', 'N/A'),
-                    'Primary Tactic': tactic,
-                    'Priority Score': priority,
-                    'Suggested Use Case': rec.get('use_case_name', 'N/A'),
-                    'Suggested Description': rec.get('description', 'N/A'),
-                    'Recommended Log Source': ', '.join(rec.get('log_sources', [])),
-                    'Key Indicators': ', '.join(rec.get('indicators', [])),
-                    'MITRE URL': url
+                # Extract technique ID if present
+                if ' - ' in lib_tech and lib_tech.startswith('T'):
+                    lib_tech_id = lib_tech.split(' - ')[0].strip()
+                else:
+                    # Try to find ID by name
+                    lib_tech_id = technique_name_to_id.get(lib_tech, lib_tech)
+                
+                # Check if it matches the gap technique
+                if lib_tech_id == gap_technique_id or lib_tech == gap_technique_name:
+                    technique_matched = True
+                    break
+            
+            if technique_matched:
+                # Extract key information from description for "Key Indicators"
+                description = str(lib_row.get('Description', ''))
+                
+                # Try to extract key indicators (look for specific patterns)
+                key_indicators = []
+                if 'EventCode' in description or 'Event ID' in description:
+                    key_indicators.append("Specific Event IDs")
+                if 'error' in description.lower() or 'failed' in description.lower():
+                    key_indicators.append("Error patterns")
+                if 'unusual' in description.lower() or 'anomal' in description.lower():
+                    key_indicators.append("Anomalous behavior")
+                if 'multiple' in description.lower() or 'excessive' in description.lower():
+                    key_indicators.append("Volume-based detection")
+                
+                if not key_indicators:
+                    key_indicators = ["See description for details"]
+                
+                recommendations.append({
+                    'Priority Score': gap_row['Priority Score'],
+                    'Missing Technique ID': gap_technique_id,
+                    'Missing Technique Name': gap_technique_name,
+                    'Primary Tactic': gap_row['Primary Tactic'],
+                    'Suggested Use Case': lib_row.get('Use Case Name', 'N/A'),
+                    'Suggested Description': lib_row.get('Description', 'N/A'),
+                    'Recommended Log Source': lib_row.get('Log Source', 'N/A'),
+                    'Key Indicators': ', '.join(key_indicators),
+                    'Reference Resources': lib_row.get('Reference Resource(s)', 'N/A'),
+                    'Search Query': lib_row.get('Search', 'N/A'),
+                    'MITRE URL': gap_row['URL']
                 })
-            
-            return pd.DataFrame(suggestions)
-            
-        except json.JSONDecodeError as e:
-            st.error(f"Error parsing Claude API response: {str(e)}")
-            st.error(f"Response received: {response[:500]}")
-            return pd.DataFrame()
+    
+    if recommendations:
+        recommendations_df = pd.DataFrame(recommendations)
+        # Sort by priority score (highest first)
+        recommendations_df = recommendations_df.sort_values('Priority Score', ascending=False)
+        # Add priority rank
+        recommendations_df.insert(0, 'Priority Rank', range(1, len(recommendations_df) + 1))
+        return recommendations_df
+    
+    return pd.DataFrame()
 
 def render_gap_analysis_page(mitre_techniques):
     """
-    Render the Gap Analysis page with Claude API-powered recommendations
+    Render the Gap Analysis page with library-based recommendations
     """
     st.markdown("# 🎯 Coverage Gap Analysis")
     
@@ -275,20 +231,6 @@ def render_gap_analysis_page(mitre_techniques):
             st.session_state.page = "home"
             st.experimental_rerun()
         return
-    
-    # API Key input in sidebar
-    with st.sidebar:
-        st.markdown("### Claude API Configuration")
-        api_key = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            help="Enter your Anthropic API key to enable AI-powered recommendations"
-        )
-        
-        if api_key:
-            st.success("✓ API Key configured")
-        else:
-            st.warning("⚠ API Key required for AI features")
     
     df = st.session_state.processed_data
     covered_techniques = st.session_state.techniques_count
@@ -367,112 +309,120 @@ def render_gap_analysis_page(mitre_techniques):
     
     st.dataframe(filtered_gaps[display_cols], use_container_width=True)
     
-    # AI-Powered Use Case Suggestions with Claude API
+    # Library-Based Use Case Recommendations
     st.markdown("---")
-    st.markdown("### 🤖 AI-Generated Use Case Recommendations")
-    st.markdown("Powered by Claude API - Get intelligent, context-aware recommendations for your coverage gaps")
+    st.markdown("### 📚 Library-Based Use Case Recommendations")
+    st.markdown("Use cases from the library that can help address your coverage gaps")
     
-    if not api_key:
-        st.warning("⚠ Please enter your Anthropic API Key in the sidebar to enable AI-powered recommendations.")
+    # Check if library data is available
+    if st.session_state.library_data is None or st.session_state.library_data.empty:
+        st.warning("⚠ No library data available. Please ensure library.csv is loaded.")
     else:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            num_recommendations = st.slider(
-                "Number of recommendations to generate",
-                min_value=5,
-                max_value=20,
-                value=10
-            )
-        with col2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            generate_button = st.button("Generate AI Recommendations", type="primary")
-        
-        if generate_button:
-            suggestions_df = generate_use_cases_with_claude(
+        # Find library matches for gaps
+        with st.spinner("Finding library use cases that match your coverage gaps..."):
+            library_recommendations = find_library_matches_for_gaps(
                 gap_df,
-                api_key,
-                top_n=num_recommendations
+                st.session_state.library_data,
+                mitre_techniques
+            )
+        
+        if not library_recommendations.empty:
+            # Store in session state
+            st.session_state.gap_suggestions = library_recommendations
+            
+            st.success(f"✓ Found {len(library_recommendations)} use cases from the library that can address your gaps!")
+            
+            # Display recommendations table
+            st.markdown("#### Recommended Use Cases to Implement")
+            
+            display_recommendations = library_recommendations[[
+                'Priority Rank', 'Priority Score', 'Missing Technique Name', 
+                'Primary Tactic', 'Suggested Use Case', 'Recommended Log Source'
+            ]]
+            
+            st.dataframe(display_recommendations, use_container_width=True)
+            
+            # Detailed Recommendation View
+            st.markdown("---")
+            st.markdown("#### Detailed Recommendation View")
+            
+            selected_suggestion = st.selectbox(
+                "Select a recommendation to view details",
+                options=library_recommendations['Suggested Use Case'].tolist()
             )
             
-            if not suggestions_df.empty:
-                st.session_state.gap_suggestions = suggestions_df
-                st.success(f"✓ Generated {len(suggestions_df)} use case recommendations!")
-            else:
-                st.error("Failed to generate recommendations. Please check your API key and try again.")
-    
-    # Display suggestions if available
-    if 'gap_suggestions' in st.session_state and not st.session_state.gap_suggestions.empty:
-        suggestions_df = st.session_state.gap_suggestions
-        
-        # Display suggestions table
-        st.markdown("#### Recommended Use Cases to Implement")
-        
-        display_suggestions = suggestions_df[[
-            'Priority Rank', 'Missing Technique Name', 'Primary Tactic',
-            'Suggested Use Case', 'Recommended Log Source', 'Priority Score'
-        ]]
-        
-        st.dataframe(display_suggestions, use_container_width=True)
-        
-        # Detailed view
-        st.markdown("#### Detailed Recommendation View")
-        selected_suggestion = st.selectbox(
-            "Select a recommendation to view details",
-            options=suggestions_df['Suggested Use Case'].tolist()
-        )
-        
-        if selected_suggestion:
-            selected = suggestions_df[
-                suggestions_df['Suggested Use Case'] == selected_suggestion
-            ].iloc[0]
+            if selected_suggestion:
+                selected = library_recommendations[
+                    library_recommendations['Suggested Use Case'] == selected_suggestion
+                ].iloc[0]
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Missing Technique**")
+                    st.info(f"{selected['Missing Technique ID']}: {selected['Missing Technique Name']}")
+                    
+                    st.markdown("**Primary Tactic**")
+                    st.write(selected['Primary Tactic'])
+                    
+                    st.markdown("**Suggested Use Case**")
+                    st.write(selected['Suggested Use Case'])
+                    
+                    st.markdown("**Description**")
+                    st.write(selected['Suggested Description'])
+                
+                with col2:
+                    st.markdown("**Priority Score**")
+                    st.progress(selected['Priority Score'] / 10)
+                    st.write(f"{selected['Priority Score']} / 10")
+                    
+                    st.markdown("**Recommended Log Source**")
+                    st.write(selected['Recommended Log Source'])
+                    
+                    st.markdown("**Key Indicators to Monitor**")
+                    st.write(selected['Key Indicators'])
+                    
+                    st.markdown("**MITRE ATT&CK Reference**")
+                    if selected['MITRE URL']:
+                        st.markdown(f"[View on MITRE ATT&CK]({selected['MITRE URL']})")
+                
+                # Display search query if available
+                if 'Search Query' in selected and selected['Search Query'] != 'N/A' and not pd.isna(selected['Search Query']):
+                    st.markdown("---")
+                    st.markdown("**Search Query**")
+                    st.code(selected['Search Query'], language="sql")
+                
+                # Display reference resources if available
+                if 'Reference Resources' in selected and selected['Reference Resources'] != 'N/A' and not pd.isna(selected['Reference Resources']):
+                    st.markdown("**Reference Resources**")
+                    st.info(selected['Reference Resources'])
             
+            # Download options
+            st.markdown("---")
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("**Missing Technique**")
-                st.info(f"{selected['Missing Technique ID']}: {selected['Missing Technique Name']}")
-                
-                st.markdown("**Suggested Use Case**")
-                st.write(selected['Suggested Use Case'])
-                
-                st.markdown("**Description**")
-                st.write(selected['Suggested Description'])
-                
-                if 'Key Indicators' in selected and selected['Key Indicators'] != 'N/A':
-                    st.markdown("**Key Indicators to Monitor**")
-                    st.write(selected['Key Indicators'])
+                st.download_button(
+                    "📥 Download Gap Analysis",
+                    gap_df.to_csv(index=False).encode('utf-8'),
+                    "coverage_gaps.csv",
+                    "text/csv"
+                )
             
             with col2:
-                st.markdown("**Primary Tactic**")
-                st.write(selected['Primary Tactic'])
-                
-                st.markdown("**Priority Score**")
-                st.progress(selected['Priority Score'] / 10)
-                st.write(f"{selected['Priority Score']} / 10")
-                
-                st.markdown("**Recommended Log Source**")
-                st.write(selected['Recommended Log Source'])
-                
-                st.markdown("**MITRE ATT&CK Reference**")
-                if selected['MITRE URL']:
-                    st.markdown(f"[View on MITRE ATT&CK]({selected['MITRE URL']})")
-        
-        # Download options
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        
-        with col1:
+                st.download_button(
+                    "📥 Download Use Case Recommendations",
+                    library_recommendations.to_csv(index=False).encode('utf-8'),
+                    "recommended_use_cases.csv",
+                    "text/csv"
+                )
+        else:
+            st.info("No library use cases found that match your coverage gaps. Consider reviewing the library or adding new use cases.")
+            
+            # Still offer download of gap analysis
             st.download_button(
                 "📥 Download Gap Analysis",
                 gap_df.to_csv(index=False).encode('utf-8'),
                 "coverage_gaps.csv",
-                "text/csv"
-            )
-        
-        with col2:
-            st.download_button(
-                "📥 Download Use Case Recommendations",
-                suggestions_df.to_csv(index=False).encode('utf-8'),
-                "recommended_use_cases.csv",
                 "text/csv"
             )
