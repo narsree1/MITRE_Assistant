@@ -395,10 +395,10 @@ def load_model():
 def load_mitre_data():
     """
     Load MITRE ATT&CK Enterprise data from GitHub.
-    ONLY loads parent techniques (excludes sub-techniques).
+    ONLY loads ACTIVE parent techniques (excludes sub-techniques, revoked, and deprecated).
     
     Returns:
-        techniques: List of parent technique dictionaries
+        techniques: List of active parent technique dictionaries
         tactic_mapping: Dictionary mapping tactic names to IDs
         tactics_list: List of all tactic names
     """
@@ -422,12 +422,24 @@ def load_mitre_data():
                 tactic_mapping[tactic_name] = tactic_id
                 tactics_list.append(tactic_name)
 
-        # Second pass: Load ONLY parent techniques (exclude sub-techniques)
+        # Second pass: Load ONLY active parent techniques (exclude sub-techniques, revoked, and deprecated)
         parent_count = 0
         sub_count = 0
+        revoked_count = 0
+        deprecated_count = 0
         
         for obj in attack_data['objects']:
             if obj.get('type') == 'attack-pattern':
+                # CRITICAL: Skip revoked techniques (old/replaced techniques)
+                if obj.get('revoked', False):
+                    revoked_count += 1
+                    continue
+                
+                # CRITICAL: Skip deprecated techniques (techniques being phased out)
+                if obj.get('x_mitre_deprecated', False):
+                    deprecated_count += 1
+                    continue
+                
                 # Get external references
                 external_refs = obj.get('external_references', [])
                 if not external_refs:
@@ -449,7 +461,7 @@ def load_mitre_data():
                 if not tech_id.startswith('T'):
                     continue
                 
-                # This is a valid parent technique
+                # This is a valid, active parent technique
                 parent_count += 1
                 techniques.append({
                     'id': tech_id,
@@ -460,8 +472,12 @@ def load_mitre_data():
                     'url': external_refs[0].get('url', '')
                 })
         
-        # Log statistics (helpful for debugging)
-        print(f"✓ MITRE Data Loaded: {parent_count} parent techniques, {sub_count} sub-techniques excluded")
+        # Log statistics (helpful for debugging and verification)
+        print(f"✓ MITRE Data Loaded: {parent_count} active parent techniques")
+        print(f"  - {sub_count} sub-techniques excluded")
+        print(f"  - {revoked_count} revoked techniques excluded")
+        print(f"  - {deprecated_count} deprecated techniques excluded")
+        print(f"  - Total techniques in dataset: {parent_count + sub_count + revoked_count + deprecated_count}")
         
         return techniques, tactic_mapping, tactics_list
         
@@ -919,7 +935,7 @@ with st.sidebar:
     """)
     
     st.markdown("---")
-    st.markdown("© 2025 | v1.5.0 (Fixed Count)")
+    st.markdown("© 2025 | v1.6.0 (Fixed MITRE Count)")
 
 # Load the ML model and MITRE data
 model = load_model()
@@ -997,8 +1013,9 @@ if st.session_state.page == "home":
                     if st.session_state.library_data is not None:
                         st.info(f"Library has {len(st.session_state.library_data)} pre-mapped security use cases that will be matched first.")
                     
-                    # Show MITRE technique count
-                    st.info(f"MITRE Enterprise ATT&CK: {len(mitre_techniques)} parent techniques loaded (sub-techniques excluded)")
+                    # Show MITRE technique count with note about what's excluded
+                    st.info(f"MITRE Enterprise ATT&CK: {len(mitre_techniques)} active parent techniques loaded")
+                    st.caption("Note: Excludes sub-techniques, revoked, and deprecated techniques")
                     
                     if st.button("Start Mapping", key="start_mapping"):
                         with st.spinner("Mapping security use cases to MITRE ATT&CK..."):
